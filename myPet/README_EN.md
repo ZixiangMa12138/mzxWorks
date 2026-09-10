@@ -1,4 +1,5 @@
 # Swing Cat (myPet)
+![alt text](Screenshot.png)
 
 [中文 README](README.md)
 

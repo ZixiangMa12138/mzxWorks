@@ -1,5 +1,5 @@
 # 秋千猫（myPet）
-![Uploading 图片.png…]()
+![alt text](Screenshot.png)
 
 [English README](README_EN.md)
 
@@ -11,7 +11,7 @@
 | 独立桌面宠物 | 完整交互、亲密度与状态提示 | `start-standalone.sh` |
 
 原生宠物只负责 Codex 的标准精灵动画；点击、拖拽、跳下秋千、亲密度、锁链和钥匙等扩展交互由独立桌面版实现。
-
+生声明:仅供学习参考，请勿用于商业用途。素材为WeChat表情包，作者无法溯源。
 ## 快速开始
 
 以下命令均在仓库根目录执行；不需要也不应修改源码中的路径。
