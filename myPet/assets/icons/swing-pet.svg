@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="badge" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#34343b"/>
+      <stop offset="1" stop-color="#121217"/>
+    </linearGradient>
+    <linearGradient id="heart" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff5b68"/>
+      <stop offset="1" stop-color="#e01732"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="170%">
+      <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#000" flood-opacity=".32"/>
+    </filter>
+  </defs>
+
+  <!-- Transparent corners make the artwork work in GNOME, KDE and docks. -->
+  <rect x="12" y="12" width="232" height="232" rx="54" fill="url(#badge)" filter="url(#shadow)"/>
+  <path d="M65 43H191" stroke="#777780" stroke-width="10" stroke-linecap="round"/>
+  <path d="M77 45V180M179 45V180" stroke="#d8d8dc" stroke-width="6" stroke-linecap="round"/>
+
+  <!-- The round white cat face and small ears preserve the pet's identity at 32 px. -->
+  <path d="M84 90 91 61l27 19M172 90l-7-29-27 19" fill="#f8f8f8" stroke="#111217" stroke-width="8" stroke-linejoin="round"/>
+  <ellipse cx="128" cy="119" rx="61" ry="51" fill="#f8f8f8" stroke="#111217" stroke-width="8"/>
+  <path d="M101 112q12-10 24 0M139 112q10-10 21 0" fill="none" stroke="#3c3c42" stroke-width="7" stroke-linecap="round"/>
+  <path d="M116 134q12 8 24 0M120 146q8 6 16 0" fill="none" stroke="#585860" stroke-width="5" stroke-linecap="round"/>
+
+  <!-- Compact black body and bright swing seat remain legible in launcher grids. -->
+  <path d="M94 158q34-17 68 0l-5 40H99z" fill="#111217"/>
+  <rect x="66" y="178" width="124" height="22" rx="8" fill="#f7f7f8" stroke="#111217" stroke-width="7"/>
+  <path d="M76 203h104" stroke="#9b9ba4" stroke-width="7" stroke-linecap="round"/>
+
+  <!-- A small affection heart distinguishes this interactive edition. -->
+  <path d="M199 77c-15-18-39 5 0 33 39-28 15-51 0-33z" fill="url(#heart)" stroke="#fff" stroke-width="4"/>
+</svg>

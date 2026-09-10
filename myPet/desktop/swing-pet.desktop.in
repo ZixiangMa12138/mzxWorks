@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=秋千猫
+GenericName=Codex 桌面宠物
+Comment=启动支持 Codex 联动与亲密度互动的秋千猫
+Exec=/usr/bin/python3 @PROJECT_DIR@/src/autostart_pet.py
+TryExec=/usr/bin/python3
+Icon=@PROJECT_DIR@/assets/icons/swing-pet.png
+Terminal=false
+StartupNotify=false
+Categories=Utility;
+Keywords=Codex;Pet;Desktop;宠物;秋千猫;

@@ -1,0 +1,17 @@
+# Python bytecode and test caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Per-machine runtime state created by the background launcher
+runtime/*
+!runtime/.gitkeep
+
+# Reproducible QA output can embed local paths and includes large previews
+qa/*.json
+qa/*.png
+qa/*.webp
+
+# Desktop integration is installed outside this repository
+*.desktop
+!desktop/*.desktop.in

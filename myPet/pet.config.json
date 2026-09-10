@@ -1,0 +1,16 @@
+{
+  "id": "swing-pet",
+  "displayName": "秋千猫",
+  "description": "一直悠闲荡秋千的表情猫。",
+  "spriteVersionNumber": 2,
+  "sourceGif": "assets/source/swing-original.gif",
+  "sourceCycleStart": 0,
+  "sourceCycleFrames": 22,
+  "canvas": {
+    "columns": 8,
+    "rows": 11,
+    "cellWidth": 192,
+    "cellHeight": 208,
+    "padding": 4
+  }
+}
