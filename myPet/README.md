@@ -1,4 +1,5 @@
 # 秋千猫（myPet）
+![Uploading 图片.png…]()
 
 [English README](README_EN.md)
 
