@@ -1,5 +1,6 @@
 # Swing Cat (myPet)
-![alt text](Screenshot.png)
+
+![alt text](screenshot.png)
 
 [中文 README](README.md)
 
@@ -36,9 +37,31 @@ Useful options:
 ./start-standalone.sh --scale 1.4
 ./start-standalone.sh --initial-affection 12
 ./start-standalone.sh --diagnose
+./start-standalone.sh --mute
 ```
 
 Use `--initial-affection 12` only to test the low-affection, explosion, and unlock flow quickly. Omit it for normal use.
+
+## Voices and sound effects
+
+The standalone edition uses GStreamer to play the release assets in `assets/audio/`:
+
+| File | Trigger and playback rule | Volume |
+| --- | --- | --- |
+| `landing-zhedia.mp3` | Plays “咋滴啊” once when jump-down finishes and the pet enters standing | 52% baseline |
+| `drag-wocao.mp3` | Plays the user's final, untruncated edit (about 2.038 seconds) while dragging; another play is allowed only after EOS plus 0.5 seconds, and releasing the mouse never cuts off the current utterance | 52% baseline |
+| `danger-rotor.mp3` | Starts when affection enters 5, ramps up on the same pipeline as affection falls from 5 to 1, and stops immediately at zero | 16.1%→69% |
+| `explosion.wav` | Plays once when affection reaches zero and the explosion begins | 94.3% |
+| `chains-metal.wav` | Plays while chains enter and stops exactly when the chain-lock animation completes | 52% baseline |
+| `unlock.wav` | Plays once when the key reaches the keyhole and unlock animation begins | 52% baseline |
+
+The runtime rotor file is about 40.7 seconds, covering the normal affection 5→0 stage without a short-file wrap. If danger persists longer, GStreamer queues the next copy through `about-to-finish` instead of restarting the pipeline after EOS. Gain changes approach their target at 0.18 per second on the existing pipeline, so becoming louder does not restart playback.
+
+Right-click the pet to toggle **Enable sound**. The preference is stored in `$XDG_CONFIG_HOME/petcat/settings.json`, or `~/.config/petcat/settings.json` when that variable is unset. `--mute` disables audio for one launch without rewriting the saved switch. If GStreamer or an MP3/WAV decoder is missing, the pet continues silently and keeps all visual interactions.
+
+`assets/audio/previews/` contains production and approval drafts only; the runtime never loads it. The rotor uses qubodup's [Helicopter Loop](https://freesound.org/people/qubodup/sounds/187678/), marked CC0/public domain on its source page, and the release MP3 joins its public high-quality preview into a longer runtime asset. Other voices came from user-supplied and approved media; verify redistribution rights before publishing them.
+
+The right-click **Set affection…** command accepts `0–1000`; this changes only the current process state and does not replace the next launch's default initial affection.
 
 For an idempotent background launch, use:
 
@@ -108,8 +131,10 @@ The installer copies `pet.json` and `spritesheet.webp` to `${CODEX_HOME:-$HOME/.
 
 - Linux, Python 3.10+, GTK 3, and a graphical session (X11 or a Wayland compositor with transparent-window support);
 - PyGObject/GTK system packages; for Ubuntu/Debian: `sudo apt install python3-gi gir1.2-gtk-3.0`;
+- GStreamer 1.0 and common audio plugins; for Ubuntu/Debian: `sudo apt install gir1.2-gstreamer-1.0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good`;
 - Pillow, NumPy, and SciPy from `requirements.txt` for building/image processing;
 - `swing-interactive.png`, `standing-transparent.png`, `jump-down.png`, and `jump-up.png` in `assets/runtime/` to run the standalone edition;
+- the six release audio files listed above in `assets/audio/` when sound is enabled (`previews/` is not used at runtime);
 - Codex only when you want automatic status integration or the native pet package.
 
 The standalone window cannot appear in a headless terminal or without a DISPLAY/Wayland session. `--diagnose` can still validate the assets.
@@ -120,6 +145,7 @@ The standalone window cannot appear in a headless terminal or without a DISPLAY/
 myPet/
 ├── assets/source/       # User-supplied GIF and standing reference art
 ├── assets/runtime/      # Generated transparent APNG/PNG interaction assets
+├── assets/audio/        # Interaction voices, rotor, explosion, chains, and unlock sounds
 ├── assets/icons/        # Launcher icon built from the lowest swing frame
 ├── desktop/             # Desktop Entry template with a path placeholder
 ├── dist/swing-pet/      # Installable local Codex v2 package
@@ -145,6 +171,7 @@ myPet/
 | Heart | Drawn live with Cairo Bézier curves; it rises and fades | `HeartEffect` |
 | Explosion, chains, lock, key | Drawn live with Cairo lines, dashes, arcs, rectangles, and star points; insertion, rotation, and shackle opening use time interpolation | `LockdownOverlay` |
 | Bubble and red tint | GTK label/CSS for text; Pillow color mapping for low-affection tinting | `standalone_pet.py` |
+| Voices and sound effects | User-approved voice/effect media plus the CC0 rotor recording; GStreamer handles separate channels, EOS gating, gapless loops, and gain ramps | `AudioManager`, `assets/audio/` |
 
 Except for the user-provided artwork in `assets/source/`, most animation and effects can be regenerated from code. Confirm that you have redistribution rights for all source art before publishing the repository.
 
@@ -152,9 +179,11 @@ Except for the user-provided artwork in `assets/source/`, most animation and eff
 
 - Click: affection `+1`, with a stackable red heart near the head; maximum 1000.
 - Drag: moves across monitors. Horizontal motion creates an opposite-direction swing lag; vertical motion holds the lowest pose. Holding without moving smoothly resumes swinging.
+- Right-click: toggle and persist sound, or set the current affection directly.
 - Hover without movement for one second: the pet jumps down beside the swing; leaving jumps it back up.
 - Dragging loses `-5` affection per full second down to 5; standing loses `-1` per second down to 5.
 - Five seconds of normal swinging without click/drag loses `-1`, down to 0. Below 10 the pet reddens; at 5 and below the swing progressively speeds up.
+- At affection `1–5`, drag and hover jump-down/jump-up are disabled; only a left recovery click (`+1` and a heart) remains. Normal interaction returns at 6. Reaching 5 during a drag or standing state cancels that interaction and returns directly to the lowest swing pose.
 - At 0 affection: an explosion starts the chain lockdown. Drag the randomly placed gold key to the central keyhole; it inserts, turns, opens the shackle, removes the chains, restores affection to 100, and resumes swinging.
 
 ## Development and rebuilding

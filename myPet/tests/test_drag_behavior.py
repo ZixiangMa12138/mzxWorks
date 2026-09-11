@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -14,9 +15,11 @@ from standalone_pet import (
     DRAG_POSE_INDEX,
     LANDING_TEXT,
     STATE_INFO_TEXT,
+    approach_volume,
     alert_markup,
     centered_popup_x,
     clamp_affection,
+    danger_rotor_volume,
     danger_speed_multiplier,
     decrease_to_floor,
     drag_pose_for_delta,
@@ -25,7 +28,10 @@ from standalone_pet import (
     hover_dismount_ready,
     low_affection_tint,
     key_hits_lock,
+    load_sound_setting,
+    low_affection_blocks_motion,
     shortest_cycle_path,
+    save_sound_setting,
     should_resume_held_drag,
     timed_affection_loss,
     window_state_hides_auxiliary,
@@ -92,6 +98,17 @@ class AffectionTests(unittest.TestCase):
         self.assertEqual(clamp_affection(1001), 1000)
         self.assertEqual(clamp_affection(-1), 0)
 
+    def test_sound_setting_round_trips_and_tolerates_invalid_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "nested" / "settings.json"
+            self.assertTrue(load_sound_setting(path))
+            save_sound_setting(False, path)
+            self.assertFalse(load_sound_setting(path))
+            save_sound_setting(True, path)
+            self.assertTrue(load_sound_setting(path))
+            path.write_text("not json", encoding="utf-8")
+            self.assertFalse(load_sound_setting(path, default=False))
+
     def test_drag_loses_five_points_each_complete_second(self) -> None:
         loss, carry = timed_affection_loss(0.6, 0.3, 5)
         self.assertEqual(loss, 0)
@@ -113,6 +130,14 @@ class AffectionTests(unittest.TestCase):
         self.assertEqual(decrease_to_floor(7, 5), 5)
         self.assertEqual(decrease_to_floor(5, 5), 5)
         self.assertEqual(decrease_to_floor(3, 5), 3)
+
+    def test_only_recovery_clicks_are_allowed_at_one_through_five(self) -> None:
+        self.assertFalse(low_affection_blocks_motion(6))
+        for affection in range(1, 6):
+            self.assertTrue(low_affection_blocks_motion(affection))
+        # Zero belongs to the existing explosion/lockdown state, not the
+        # recover-by-click state.
+        self.assertFalse(low_affection_blocks_motion(0))
 
     def test_idle_decay_counts_every_five_second_period(self) -> None:
         self.assertEqual(elapsed_periods(4.99, 5.0, 5.0), 0)
@@ -138,6 +163,19 @@ class AffectionTests(unittest.TestCase):
         before = danger_speed_multiplier(5, 0.5 - 0.000001)
         after = danger_speed_multiplier(5, 0.5 + 0.000001)
         self.assertLess(abs(after - before), 0.000001)
+
+    def test_danger_rotor_grows_louder_then_stops_at_zero(self) -> None:
+        self.assertEqual(danger_rotor_volume(6), 0.0)
+        self.assertAlmostEqual(danger_rotor_volume(5), 0.161)
+        self.assertGreater(danger_rotor_volume(4), danger_rotor_volume(5))
+        self.assertGreater(danger_rotor_volume(1), danger_rotor_volume(2))
+        self.assertAlmostEqual(danger_rotor_volume(1), 0.69)
+        self.assertEqual(danger_rotor_volume(0), 0.0)
+
+    def test_rotor_volume_approaches_target_without_jumping(self) -> None:
+        self.assertAlmostEqual(approach_volume(0.14, 0.60, 0.5, 0.18), 0.23)
+        self.assertAlmostEqual(approach_volume(0.59, 0.60, 0.5, 0.18), 0.60)
+        self.assertAlmostEqual(approach_volume(0.60, 0.14, 0.5, 0.18), 0.51)
 
     def test_low_affection_has_ten_progressive_red_levels(self) -> None:
         self.assertEqual(low_affection_tint(11), 0.0)

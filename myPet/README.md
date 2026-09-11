@@ -1,5 +1,6 @@
 # 秋千猫（myPet）
-![alt text](Screenshot.png)
+
+![alt text](screenshot.png)
 
 [English README](README_EN.md)
 
@@ -11,7 +12,7 @@
 | 独立桌面宠物 | 完整交互、亲密度与状态提示 | `start-standalone.sh` |
 
 原生宠物只负责 Codex 的标准精灵动画；点击、拖拽、跳下秋千、亲密度、锁链和钥匙等扩展交互由独立桌面版实现。
-生声明:仅供学习参考，请勿用于商业用途。素材为WeChat表情包，作者无法溯源。
+
 ## 快速开始
 
 以下命令均在仓库根目录执行；不需要也不应修改源码中的路径。
@@ -36,9 +37,31 @@ python3 -m pip install -r requirements.txt
 ./start-standalone.sh --scale 1.4
 ./start-standalone.sh --initial-affection 12
 ./start-standalone.sh --diagnose
+./start-standalone.sh --mute
 ```
 
 `--initial-affection 12` 仅用于快速测试低亲密度、爆炸和解锁流程。生产使用请省略该参数。
+
+## 声音与音效
+
+独立版使用 GStreamer 播放 `assets/audio/` 下的正式运行资源：
+
+| 文件 | 触发条件与播放规则 | 音量 |
+| --- | --- | --- |
+| `landing-zhedia.mp3` | 跳下秋千并进入站立状态时播放一次“咋滴啊” | 基准 52% |
+| `drag-wocao.mp3` | 拖拽期间播放用户最终裁切的完整语音（约 2.038 秒）；必须收到播放结束事件后再等待 0.5 秒才允许下一次，松开鼠标不会截断当前语音 | 基准 52% |
+| `danger-rotor.mp3` | 亲密度进入 5 时开始；亲密度 5→1 时在同一播放管线上平滑增大；亲密度归零时立即停止 | 16.1%→69% |
+| `explosion.wav` | 亲密度归零并开始爆炸时播放一次 | 94.3% |
+| `chains-metal.wav` | 锁链进入屏幕时播放，锁链封锁动画完成时立即停止 | 基准 52% |
+| `unlock.wav` | 钥匙命中锁孔并开始开锁动画时播放一次 | 基准 52% |
+
+旋翼运行文件约 40.7 秒，可覆盖正常的亲密度 5→0 阶段，避免短素材频繁回绕；长期停留在危险状态时，GStreamer 会通过 `about-to-finish` 提前预载下一轮，而不是等到结束后重启管线。音量变化只调整现有管线的增益，按每秒 0.18 的速率靠近目标值，不会为了变响而重新开始音频。
+
+右键点击宠物可勾选“开启音效”，设置保存到 `$XDG_CONFIG_HOME/petcat/settings.json`；未设置该环境变量时使用 `~/.config/petcat/settings.json`。`--mute` 只关闭本次启动的音频，不改写持久化开关。缺少 GStreamer 或 MP3/WAV 解码插件时，宠物会静默运行，动画和其他交互不受影响。
+
+`assets/audio/previews/` 仅保存制作和确认过程中的试听稿，不参与运行。螺旋桨采用 qubodup 的 [Helicopter Loop](https://freesound.org/people/qubodup/sounds/187678/)，来源页标注为 CC0/公有领域；正式长 MP3 由其公开高质量预览拼接而成。其他语音来自用户提供并确认的素材；发布仓库前仍应确认相关语音的传播授权。
+
+右键菜单中的“设置亲密度…”可输入 `0–1000`；这是当前运行状态，不会替换下次启动的默认初始亲密度。
 
 需要后台且防重复启动时，使用：
 
@@ -110,8 +133,10 @@ python3 src/build_pet.py
 
 - Linux、Python 3.10+、GTK 3 与可用的图形会话（X11 或支持透明窗口的 Wayland 合成器）；
 - PyGObject/GTK 的系统包；Ubuntu/Debian 示例：`sudo apt install python3-gi gir1.2-gtk-3.0`；
+- GStreamer 1.0 及常用音频解码插件；Ubuntu/Debian 示例：`sudo apt install gir1.2-gstreamer-1.0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good`；
 - `requirements.txt` 中的 Pillow、NumPy、SciPy（构建和图像处理需要）；
 - `assets/runtime/` 内的 `swing-interactive.png`、`standing-transparent.png`、`jump-down.png`、`jump-up.png`（运行独立版需要）；
+- `assets/audio/` 内表格列出的 6 个正式音频文件（开启声音时需要；`previews/` 不参与运行）；
 - Codex 仅在需要自动状态联动或原生宠物时才是必需项。
 
 在没有合成器、远程纯终端或无 `DISPLAY`/Wayland 会话中，独立窗口无法显示；仍可使用 `--diagnose` 检查素材是否可读。
@@ -123,6 +148,7 @@ myPet/
 ├── assets/
 │   ├── source/                 # 用户提供的 GIF 与站立参考素材
 │   ├── runtime/                # 构建出的透明 APNG/PNG 交互素材
+│   ├── audio/                  # 交互语音、螺旋桨、爆炸、铁链与开锁音效
 │   └── icons/                  # 从最低点摆动帧生成的应用图标
 ├── desktop/                    # 路径占位符形式的 Desktop Entry 模板
 ├── dist/swing-pet/             # 可安装的 Codex v2 本地宠物包
@@ -149,6 +175,7 @@ myPet/
 | 爱心 | 无额外图片素材，使用 Cairo Bézier 曲线实时绘制、上升并淡出 | `HeartEffect` |
 | 爆炸、铁链、锁头、钥匙 | 无额外位图，使用 Cairo 直线、虚线、圆弧、矩形与星形实时绘制；钥匙插入、旋转和锁梁弹开均由时间插值驱动 | `LockdownOverlay` |
 | 文本框与低亲密度红色 | GTK 标签/CSS 绘制文本；Pillow 对运行时帧进行色调映射 | `standalone_pet.py` |
+| 语音与音效 | 用户确认的语音/效果素材及 CC0 旋翼录音；GStreamer 负责独立通道、播放结束检测、无缝循环和渐变音量 | `AudioManager`、`assets/audio/` |
 
 因此除 `assets/source/` 的用户原始素材外，大多数动画和特效均可由代码重新生成。请在公开仓库前确认你拥有原始 GIF、参考图和人物表情素材的发布权。
 
@@ -156,9 +183,11 @@ myPet/
 
 - 单击宠物：亲密度 `+1`，头部附近出现可叠加的红色爱心；上限为 1000。
 - 拖拽宠物：可跨显示器移动。左右拖动时秋千向反方向滞后，上下拖动处于最低点；鼠标停止移动但仍按住时会平滑恢复摆动。
+- 右键宠物：可开启/关闭并持久保存音效，也可直接设置当前亲密度。
 - 悬停静止 1 秒：宠物在最低点跳到秋千旁；离开后跳回秋千。
 - 拖拽：每完整秒亲密度 `-5`，最低降到 5；落地站立时每秒 `-1`，同样最低到 5。
 - 普通摆动 5 秒无点击/拖拽：亲密度 `-1`，可继续降到 0。低于 10 时逐级变红；5 以下摆动会持续加速。
+- 亲密度为 `1–5`：禁用拖拽和悬停跳下/跳上，仅保留左键点击 `+1` 与爱心；恢复到 6 后重新开放普通互动。若拖拽或站立期间刚降到 5，会立即取消互动并回到最低点摆动。
 - 亲密度为 0：爆炸后进入锁链封锁。将随机出现的金色钥匙拖到中央锁孔，钥匙会插入、转动、打开锁梁，锁链消失，亲密度恢复到 100。
 
 ## 开发与重新构建

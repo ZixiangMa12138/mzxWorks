@@ -16,6 +16,7 @@ all widgets and animation state therefore remain single-threaded.
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import random
@@ -31,6 +32,14 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gdk, GdkPixbuf, GLib, Gtk  # noqa: E402
+
+# Audio is an optional enhancement for the standalone GTK pet. Import it
+# separately so a machine without GStreamer can still run every visual feature.
+try:  # pragma: no cover - availability depends on the desktop installation
+    gi.require_version("Gst", "1.0")
+    from gi.repository import Gst  # noqa: E402
+except (ImportError, ValueError):  # pragma: no cover
+    Gst = None
 
 from codex_bridge import BridgeUpdate, CodexBridge
 
@@ -56,11 +65,24 @@ def set_process_name() -> None:
 
 
 ROOT = Path(__file__).resolve().parents[1]
+CONFIG_ROOT = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "petcat"
+SETTINGS_PATH = CONFIG_ROOT / "settings.json"
 RUNTIME_ASSETS = ROOT / "assets" / "runtime"
+AUDIO_ASSETS = ROOT / "assets" / "audio"
 DEFAULT_ASSET = RUNTIME_ASSETS / "swing-interactive.png"
 DEFAULT_STANDING_ASSET = RUNTIME_ASSETS / "standing-transparent.png"
 DEFAULT_JUMP_DOWN_ASSET = RUNTIME_ASSETS / "jump-down.png"
 DEFAULT_JUMP_UP_ASSET = RUNTIME_ASSETS / "jump-up.png"
+AUDIO_LANDING = AUDIO_ASSETS / "landing-zhedia.mp3"
+AUDIO_DRAG = AUDIO_ASSETS / "drag-wocao.mp3"
+AUDIO_EXPLOSION = AUDIO_ASSETS / "explosion.wav"
+AUDIO_CHAINS = AUDIO_ASSETS / "chains-metal.wav"
+AUDIO_UNLOCK = AUDIO_ASSETS / "unlock.wav"
+AUDIO_ROTOR = AUDIO_ASSETS / "danger-rotor.mp3"
+AUDIO_VOLUME = 0.52
+AUDIO_EXPLOSION_VOLUME = 0.943
+DRAG_VOICE_GAP_SECONDS = 0.5
+AUDIO_VOLUME_RAMP_PER_SECOND = 0.18
 
 # Codex changes playback speed, never frame order. This preserves the source
 # swing's fixed top anchors and pixel-identical loop seam in every app state.
@@ -128,6 +150,26 @@ STATE_LABEL = {
 }
 
 
+def load_sound_setting(path: Path = SETTINGS_PATH, default: bool = True) -> bool:
+    """Load the persisted sound switch, tolerating absent or damaged config."""
+    try:
+        value = json.loads(path.read_text(encoding="utf-8")).get("sound_enabled")
+    except (FileNotFoundError, OSError, json.JSONDecodeError, AttributeError):
+        return default
+    return value if isinstance(value, bool) else default
+
+
+def save_sound_setting(enabled: bool, path: Path = SETTINGS_PATH) -> None:
+    """Atomically persist the sound switch outside the Git working tree."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps({"sound_enabled": bool(enabled)}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
 def drag_pose_for_delta(dx: float, dy: float) -> str | None:
     """Map pointer velocity to the physically lagging swing pose."""
     if abs(dx) >= DRAG_AXIS_THRESHOLD:
@@ -158,6 +200,11 @@ def clamp_affection(value: int) -> int:
     return max(0, min(AFFECTION_MAX, int(value)))
 
 
+def low_affection_blocks_motion(affection: int) -> bool:
+    """Allow only recovery clicks while affinity is in the 1..5 danger range."""
+    return 0 < affection <= DANGER_AFFECTION_THRESHOLD
+
+
 def low_affection_tint(affection: int) -> float:
     """Return ten visibly distinct red-tint levels for affinity 10 through 1."""
     if affection <= 0:
@@ -182,6 +229,27 @@ def danger_speed_multiplier(affection: int, elapsed: float) -> float:
     fraction = step_position - completed_steps
     eased_fraction = fraction * fraction * (3.0 - 2.0 * fraction)
     return 1.0 + (completed_steps + eased_fraction) * DANGER_SPEED_STEP
+
+
+def danger_rotor_volume(affection: int) -> float:
+    """Map affinity 5..1 to a progressively louder but still moderate rotor."""
+    if affection <= 0 or affection > DANGER_AFFECTION_THRESHOLD:
+        return 0.0
+    danger_progress = (DANGER_AFFECTION_THRESHOLD - affection) / max(
+        1, DANGER_AFFECTION_THRESHOLD - 1
+    )
+    # Both endpoints are 15% louder than the originally approved 0.14..0.60
+    # curve, while remaining below GStreamer's unity-gain value of 1.0.
+    return 0.161 + danger_progress * 0.529
+
+
+def approach_volume(current: float, target: float, elapsed: float, rate: float) -> float:
+    """Move an audio level toward its target without an audible step change."""
+    distance = target - current
+    maximum_step = max(0.0, elapsed) * max(0.0, rate)
+    if abs(distance) <= maximum_step:
+        return target
+    return current + math.copysign(maximum_step, distance)
 
 
 def elapsed_periods(now: float, deadline: float, period: float) -> int:
@@ -333,6 +401,189 @@ def load_animation(path: Path, scale: float) -> list[AnimationFrame]:
     if not frames:
         raise RuntimeError(f"No animation frames found in {path}")
     return frames
+
+
+class AudioManager:
+    """Play short interaction sounds through reusable GStreamer channels.
+
+    Voice, impact, rotor, and chain sounds use separate channels. Completion is
+    read from each GStreamer bus so repeated speech never truncates itself.
+    """
+
+    def __init__(self, enabled: bool = True, volume: float = AUDIO_VOLUME) -> None:
+        self.available = Gst is not None
+        self.enabled = enabled and self.available
+        self.volume = volume
+        self.players: dict[str, object] = {}
+        self.playing: set[str] = set()
+        self.looping: set[str] = set()
+        self.paths: dict[str, Path] = {}
+        self.channel_volumes: dict[str, float] = {}
+        self.volume_targets: dict[str, float] = {}
+        self.last_volume_tick = time.monotonic()
+        self.ready_at: dict[str, float] = {}
+        self.end_gaps: dict[str, float] = {}
+        if self.enabled:
+            Gst.init(None)
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Apply the menu sound switch immediately without rebuilding the pet."""
+        requested = bool(enabled)
+        if not requested:
+            self.stop_all()
+            self.enabled = False
+            return
+        self.enabled = self.available
+        if self.enabled:
+            Gst.init(None)
+            self.last_volume_tick = time.monotonic()
+
+    def _player(self, channel: str):
+        """Return one reusable playbin per logical sound channel."""
+        player = self.players.get(channel)
+        if player is None:
+            player = Gst.ElementFactory.make("playbin", f"petcat-{channel}")
+            if player is None:
+                self.enabled = False
+                return None
+            # Queue the same URI before a rotor reaches EOS. Playbin performs
+            # this hand-off gaplessly; the EOS seek below remains only a safety
+            # fallback for backends that do not emit about-to-finish.
+            player.connect("about-to-finish", self._on_about_to_finish, channel)
+            self.players[channel] = player
+        return player
+
+    def _on_about_to_finish(self, player, channel: str) -> None:
+        """Queue another copy of an active loop without stopping its pipeline."""
+        path = self.paths.get(channel)
+        if channel in self.looping and path is not None:
+            player.set_property("uri", path.resolve().as_uri())
+
+    def _start(self, channel: str, path: Path, volume: float | None = None) -> bool:
+        """Start a channel without changing its loop or cooldown policy."""
+        player = self._player(channel)
+        if player is None:
+            return False
+        player.set_state(Gst.State.NULL)
+        effective_volume = (
+            self.channel_volumes.get(channel, self.volume) if volume is None else volume
+        )
+        self.channel_volumes[channel] = effective_volume
+        player.set_property("volume", effective_volume)
+        player.set_property("uri", path.resolve().as_uri())
+        player.set_state(Gst.State.PLAYING)
+        self.paths[channel] = path
+        self.playing.add(channel)
+        return True
+
+    def play(self, channel: str, path: Path, volume: float | None = None) -> None:
+        """Start a local file on a named channel, replacing any prior sound."""
+        if not self.enabled or not path.is_file():
+            return
+        self.looping.discard(channel)
+        self.volume_targets.pop(channel, None)
+        self.channel_volumes[channel] = self.volume if volume is None else volume
+        self.ready_at.pop(channel, None)
+        self.end_gaps.pop(channel, None)
+        self._start(channel, path, volume)
+
+    def request(self, channel: str, path: Path, gap: float = 0.0) -> bool:
+        """Play only after the prior clip ends and its post-play gap elapses.
+
+        Calling this every render tick is safe: an active clip is never cut off.
+        If callers stop requesting after a drag release, the current clip still
+        reaches EOS naturally but no later clip is started.
+        """
+        if not self.enabled or not path.is_file():
+            return False
+        now = time.monotonic()
+        self._poll_channel(channel, now)
+        if channel in self.playing or now < self.ready_at.get(channel, 0.0):
+            return False
+        self.end_gaps[channel] = max(0.0, gap)
+        return self._start(channel, path)
+
+    def start_loop(self, channel: str, path: Path, volume: float) -> None:
+        """Keep an effect looping and ramp toward new volume without restarting."""
+        if not self.enabled or not path.is_file():
+            return
+        self.looping.add(channel)
+        self.paths[channel] = path
+        self.volume_targets[channel] = volume
+        if channel not in self.playing:
+            # A newly entered danger stage begins quietly at its affinity-5
+            # level. Later affinity changes update only the target and tick()
+            # performs the audible transition continuously.
+            self.channel_volumes[channel] = volume
+            self._start(channel, path, volume)
+
+    def _poll_channel(self, channel: str, now: float) -> None:
+        """Consume a non-blocking EOS/error message for one channel."""
+        player = self.players.get(channel)
+        if player is None or channel not in self.playing:
+            return
+        message = player.get_bus().pop_filtered(Gst.MessageType.EOS | Gst.MessageType.ERROR)
+        if message is None:
+            return
+        if message.type == Gst.MessageType.EOS and channel in self.looping:
+            # Seek on the existing pipeline instead of tearing it down. This
+            # avoids an audible gap when the danger rotor wraps to its first
+            # sample and preserves the current affinity-driven volume.
+            player.seek_simple(Gst.Format.TIME, Gst.SeekFlags.FLUSH, 0)
+            player.set_state(Gst.State.PLAYING)
+            return
+        player.set_state(Gst.State.NULL)
+        self.playing.discard(channel)
+        if message.type == Gst.MessageType.EOS:
+            self.ready_at[channel] = now + self.end_gaps.get(channel, 0.0)
+        else:
+            self.looping.discard(channel)
+
+    def tick(self, now: float) -> None:
+        """Poll completion, restart loops, and smoothly approach target levels."""
+        if not self.enabled:
+            return
+        elapsed = max(0.0, now - self.last_volume_tick)
+        self.last_volume_tick = now
+        for channel, target in tuple(self.volume_targets.items()):
+            current = self.channel_volumes.get(channel, target)
+            updated = approach_volume(
+                current, target, elapsed, AUDIO_VOLUME_RAMP_PER_SECOND
+            )
+            self.channel_volumes[channel] = updated
+            player = self.players.get(channel)
+            if player is not None and channel in self.playing:
+                player.set_property("volume", updated)
+        for channel in tuple(self.playing):
+            self._poll_channel(channel, now)
+        for channel in tuple(self.looping):
+            if channel not in self.playing and channel in self.paths:
+                self._start(channel, self.paths[channel])
+
+    def stop(self, channel: str) -> None:
+        """Stop one sound immediately, used when chain movement has completed."""
+        player = self.players.get(channel)
+        if player is not None:
+            player.set_state(Gst.State.NULL)
+        self.playing.discard(channel)
+        self.looping.discard(channel)
+        self.ready_at.pop(channel, None)
+        self.end_gaps.pop(channel, None)
+        self.channel_volumes.pop(channel, None)
+        self.volume_targets.pop(channel, None)
+
+    def stop_all(self) -> None:
+        """Release audio devices before the GTK process exits."""
+        for player in self.players.values():
+            player.set_state(Gst.State.NULL)
+        self.players.clear()
+        self.playing.clear()
+        self.looping.clear()
+        self.paths.clear()
+        self.channel_volumes.clear()
+        self.volume_targets.clear()
+        self.ready_at.clear()
+        self.end_gaps.clear()
 
 
 class HeartEffect(Gtk.Window):
@@ -516,8 +767,15 @@ class LockdownOverlay(Gtk.Window):
 
     def _set_phase(self, phase: str) -> None:
         """Enter one lockdown phase and reset its monotonic animation clock."""
+        previous_phase = self.phase
         self.phase = phase
         self.phase_started = time.monotonic()
+        if phase == "chains_in":
+            self.owner.audio.play("chains", AUDIO_CHAINS)
+        elif previous_phase == "chains_in":
+            # The metal collision belongs only to moving chains. Stop it at the
+            # exact phase boundary even if the source file has audio remaining.
+            self.owner.audio.stop("chains")
         if phase == "locked":
             self.chain_progress = 1.0
             self._randomize_key()
@@ -579,6 +837,7 @@ class LockdownOverlay(Gtk.Window):
         key_x, key_y = self.key_position
         if key_hits_lock(key_x, key_y, self.workarea.width, self.workarea.height):
             self.key_insert_start = (key_x, key_y)
+            self.owner.audio.play("mechanism", AUDIO_UNLOCK)
             self._set_phase("key_unlock")
         return True
 
@@ -759,12 +1018,15 @@ class PetWindow(Gtk.Window):
         animations: dict[str, list[AnimationFrame]],
         scale: float,
         initial_affection: int = AFFECTION_DEFAULT,
+        audio_enabled: bool = True,
     ) -> None:
         super().__init__(title="Swing Pet")
         self.animations = animations
         self.animation_name = "swing"
         self.frames = animations[self.animation_name]
         self.scale = scale
+        self.sound_enabled = bool(audio_enabled)
+        self.audio = AudioManager(enabled=audio_enabled)
         # Keep overlays anchored to the lowest/vertical swing pose. Individual
         # animation frames move inside the wide transparent canvas, but UI must
         # remain stable while only the pet swings underneath it.
@@ -856,6 +1118,7 @@ class PetWindow(Gtk.Window):
         self.connect("destroy", self._on_destroy)
         self._schedule_tick(0)
         self._refresh_info()
+        self._sync_danger_audio()
 
     def _next_tick_delay_ms(self) -> int:
         """Choose the cheapest cadence that still preserves visible motion.
@@ -1045,6 +1308,7 @@ class PetWindow(Gtk.Window):
 
     def _on_destroy(self, *_args) -> None:
         """Destroy auxiliary windows before stopping the GTK event loop."""
+        self.audio.stop_all()
         for heart in list(self.hearts):
             heart.destroy()
         self.hearts.clear()
@@ -1064,11 +1328,96 @@ class PetWindow(Gtk.Window):
         heart = HeartEffect(self)
         self.hearts.append(heart)
 
+    def _set_audio_enabled(self, enabled: bool) -> None:
+        """Apply and persist the right-click sound preference immediately."""
+        self.sound_enabled = bool(enabled)
+        self.audio.set_enabled(self.sound_enabled)
+        try:
+            save_sound_setting(self.sound_enabled)
+        except OSError:
+            # A read-only or unavailable config directory should not make the
+            # desktop pet unusable; the switch still applies for this process.
+            pass
+        self._sync_danger_audio()
+
+    def _show_affection_dialog(self, *_args) -> None:
+        """Prompt for an exact 0..1000 affinity value from the context menu."""
+        self.hover_idle_since = None
+        dialog = Gtk.Dialog(
+            title="设置亲密度",
+            transient_for=self,
+            flags=Gtk.DialogFlags.MODAL | Gtk.DialogFlags.DESTROY_WITH_PARENT,
+        )
+        dialog.add_buttons(
+            "取消",
+            Gtk.ResponseType.CANCEL,
+            "确定",
+            Gtk.ResponseType.OK,
+        )
+        content = dialog.get_content_area()
+        content.set_spacing(10)
+        content.set_border_width(14)
+        label = Gtk.Label(label=f"请输入亲密度（0–{AFFECTION_MAX}）：")
+        label.set_xalign(0.0)
+        spin = Gtk.SpinButton.new_with_range(0, AFFECTION_MAX, 1)
+        spin.set_value(self.affection)
+        spin.set_numeric(True)
+        spin.set_activates_default(True)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        content.pack_start(label, False, False, 0)
+        content.pack_start(spin, False, False, 0)
+        dialog.show_all()
+        response = dialog.run()
+        selected = int(spin.get_value())
+        dialog.destroy()
+        if response == Gtk.ResponseType.OK:
+            # Manual adjustment starts a fresh timing period, avoiding an
+            # immediate decay caused by carry accumulated before the dialog.
+            self.next_affection_decay = time.monotonic() + AFFECTION_DECAY_SECONDS
+            self.drag_decay_carry = 0.0
+            self.standing_decay_carry = 0.0
+            self._set_affection(selected)
+
     def _record_interaction(self, affection_delta: int = 0) -> None:
         """Reset ordinary idle decay and optionally apply a click reward."""
         self.next_affection_decay = time.monotonic() + AFFECTION_DECAY_SECONDS
         if affection_delta:
             self._set_affection(self.affection + affection_delta)
+
+    def _sync_danger_audio(self) -> None:
+        """Start, stop, or smoothly retune the low-affinity rotor loop."""
+        volume = danger_rotor_volume(self.affection)
+        if volume > 0.0 and not self.locked_out:
+            self.audio.start_loop("rotor", AUDIO_ROTOR, volume)
+        else:
+            self.audio.stop("rotor")
+
+    def _cancel_low_affection_motion(self) -> None:
+        """Cancel drag/hover state and return directly to a safe swing pose.
+
+        This intentionally does not play jump-up: once affinity reaches 5 the
+        only accepted interaction is a recovery click, so even a transition
+        animation must not continue as an indirect hover response.
+        """
+        self.drag_candidate = False
+        self.dragging = False
+        self.drag_alert_active = False
+        self.pending_drag_root = None
+        self.drag_window_position = None
+        self.drag_target_pose = None
+        self.drag_transition_path.clear()
+        self.drag_transition_elapsed = 0.0
+        self.pending_hover = False
+        self.pending_return = False
+        self.hover_idle_since = None
+        self.drag_decay_carry = 0.0
+        self.standing_decay_carry = 0.0
+        if self.animation_name != "swing":
+            self.animation_name = "swing"
+            self.frames = self.animations["swing"]
+            self.frame_index = DRAG_POSE_INDEX["bottom"]
+            self.frame_elapsed = 0.0
+            self._display_frame()
 
     def _set_affection(self, value: int) -> None:
         """Store affinity without synchronously redrawing a moving swing frame."""
@@ -1078,10 +1427,13 @@ class PetWindow(Gtk.Window):
         was_in_danger = 0 < self.affection <= DANGER_AFFECTION_THRESHOLD
         self.affection = value
         is_in_danger = 0 < self.affection <= DANGER_AFFECTION_THRESHOLD
+        if low_affection_blocks_motion(self.affection):
+            self._cancel_low_affection_motion()
         if is_in_danger and not was_in_danger:
             self.danger_speed_started = time.monotonic()
         elif not is_in_danger:
             self.danger_speed_started = None
+        self._sync_danger_audio()
         # Keep tints keyed by affection instead of clearing them on each point
         # loss. More importantly, do not redraw the active swing frame here:
         # the next scheduled GIF frame picks up the new tint within 40 ms. This
@@ -1125,6 +1477,10 @@ class PetWindow(Gtk.Window):
     def _begin_lockdown(self) -> None:
         """Freeze at the vertical swing pose and hand control to the overlay."""
         self.locked_out = True
+        # Stop the escalating rotor before the louder explosion begins, keeping
+        # the transition distinct and preventing the two low-frequency effects
+        # from masking each other.
+        self.audio.stop("rotor")
         self.drag_candidate = False
         self.dragging = False
         self.drag_alert_active = False
@@ -1138,12 +1494,14 @@ class PetWindow(Gtk.Window):
         self.frame_elapsed = 0.0
         self._display_frame()
         self._hide_info()
+        self.audio.play("impact", AUDIO_EXPLOSION, AUDIO_EXPLOSION_VOLUME)
         self.lockdown = LockdownOverlay(self)
 
     def _finish_unlock(self) -> None:
         """Restore affinity 100 and resume from the bottom of the swing cycle."""
         self.lockdown = None
         self.locked_out = False
+        self.audio.stop("rotor")
         self.affection = AFFECTION_DEFAULT
         self.danger_speed_started = None
         self.tint_cache.clear()
@@ -1191,6 +1549,15 @@ class PetWindow(Gtk.Window):
                 return False
             self.pending_hover = False
             self.hover_idle_since = None
+            if low_affection_blocks_motion(self.affection):
+                # Reward immediately without arming a drag gesture. Repeated
+                # clicks can recover above 5, at which point normal interaction
+                # becomes available again on the next press.
+                self._record_interaction(1)
+                self._spawn_heart()
+                self._refresh_info()
+                self._show_info()
+                return True
             self._record_interaction()
             self.drag_candidate = True
             self.dragging = False
@@ -1200,6 +1567,7 @@ class PetWindow(Gtk.Window):
             self.drag_origin = self.get_position()
             return True
         if event.button == 3:
+            self.hover_idle_since = None
             menu = Gtk.Menu()
             status = Gtk.MenuItem(label=STATE_LABEL[self.pet_state])
             status.set_sensitive(False)
@@ -1207,6 +1575,15 @@ class PetWindow(Gtk.Window):
             affection = Gtk.MenuItem(label=f"亲密度：{self.affection} / {AFFECTION_MAX}")
             affection.set_sensitive(False)
             menu.append(affection)
+            set_affection = Gtk.MenuItem(label="设置亲密度…")
+            set_affection.connect("activate", self._show_affection_dialog)
+            menu.append(set_affection)
+            audio_item = Gtk.CheckMenuItem(label="开启音效")
+            audio_item.set_active(self.sound_enabled)
+            audio_item.connect(
+                "toggled", lambda item: self._set_audio_enabled(item.get_active())
+            )
+            menu.append(audio_item)
             menu.append(Gtk.SeparatorMenuItem())
             quit_item = Gtk.MenuItem(label="退出宠物")
             quit_item.connect("activate", lambda *_: self.destroy())
@@ -1261,6 +1638,7 @@ class PetWindow(Gtk.Window):
             self.drag_transition_path.clear()
             self.drag_transition_elapsed = 0.0
             self.last_drag_motion = time.monotonic()
+            self.audio.request("drag-voice", AUDIO_DRAG, DRAG_VOICE_GAP_SECONDS)
             self._refresh_info()
             self._show_info()
 
@@ -1342,7 +1720,11 @@ class PetWindow(Gtk.Window):
         self.pointer_inside = True
         if self._point_hits_visible_pet(event.x, event.y):
             self._show_info()
-            self.hover_idle_since = time.monotonic()
+            self.hover_idle_since = (
+                None
+                if low_affection_blocks_motion(self.affection)
+                else time.monotonic()
+            )
         return False
 
     def _on_pointer_motion(self, _widget: Gtk.Widget, event: Gdk.EventMotion) -> bool:
@@ -1350,6 +1732,11 @@ class PetWindow(Gtk.Window):
         if self.locked_out:
             return True
         self.pointer_inside = True
+        if low_affection_blocks_motion(self.affection):
+            self._cancel_low_affection_motion()
+            if self._point_hits_visible_pet(event.x, event.y):
+                self._show_info()
+            return False
         if self.drag_candidate:
             # Do not move a pair of top-level windows for every raw event. The
             # latest pointer position is applied by the adaptive render tick.
@@ -1387,7 +1774,12 @@ class PetWindow(Gtk.Window):
 
     def _request_dismount(self) -> None:
         """Dismount at the bottom pose; otherwise defer until the loop boundary."""
-        if self.locked_out or self.suppress_hover_until_leave or self.drag_candidate:
+        if (
+            self.locked_out
+            or low_affection_blocks_motion(self.affection)
+            or self.suppress_hover_until_leave
+            or self.drag_candidate
+        ):
             return
         if self.animation_name != "swing":
             return
@@ -1405,6 +1797,10 @@ class PetWindow(Gtk.Window):
         self.standing_decay_carry = 0.0
         self._display_frame()
         self._refresh_info()
+        if name == "standing":
+            # Speak only after landing, at the same moment the “咋滴啊？” bubble
+            # appears. Jump frames themselves remain uninterrupted.
+            self.audio.play("voice", AUDIO_LANDING)
         if self.info_popup.get_visible():
             self._position_info_popup()
 
@@ -1446,6 +1842,7 @@ class PetWindow(Gtk.Window):
         select their next stable animation.
         """
         now = time.monotonic()
+        self.audio.tick(now)
         elapsed_seconds = max(0.0, now - self.last_tick)
         elapsed_ms = elapsed_seconds * 1000.0
         self.last_tick = now
@@ -1460,6 +1857,10 @@ class PetWindow(Gtk.Window):
             self._update_drag(root_x, root_y)
 
         if self.dragging:
+            # EOS, rather than an arbitrary one-second timer, gates repetition.
+            # Releasing the mouse simply stops future requests; GStreamer still
+            # plays the current utterance to completion.
+            self.audio.request("drag-voice", AUDIO_DRAG, DRAG_VOICE_GAP_SECONDS)
             loss, self.drag_decay_carry = timed_affection_loss(
                 elapsed_seconds, self.drag_decay_carry, AFFECTION_DRAG_LOSS
             )
@@ -1487,7 +1888,7 @@ class PetWindow(Gtk.Window):
                 if self.locked_out:
                     return True
 
-        if hover_dismount_ready(
+        if not low_affection_blocks_motion(self.affection) and hover_dismount_ready(
             now,
             self.hover_idle_since,
             self.pointer_inside,
@@ -1590,6 +1991,7 @@ def main() -> int:
         help="initial affinity, 0-1000 (or set SWING_PET_INITIAL_AFFECTION)",
     )
     parser.add_argument("--no-codex", action="store_true", help="play without Codex linkage")
+    parser.add_argument("--mute", action="store_true", help="disable interaction audio")
     parser.add_argument("--diagnose", action="store_true", help="verify assets without opening a window")
     args = parser.parse_args()
 
@@ -1613,7 +2015,15 @@ def main() -> int:
         "jump_down": load_animation(args.jump_down, args.scale),
         "jump_up": load_animation(args.jump_up, args.scale),
     }
-    window = PetWindow(animations, args.scale, args.initial_affection)
+    # The right-click preference survives restarts. ``--mute`` remains a
+    # one-launch override and does not rewrite that persisted preference.
+    audio_enabled = load_sound_setting() and not args.mute
+    window = PetWindow(
+        animations,
+        args.scale,
+        args.initial_affection,
+        audio_enabled=audio_enabled,
+    )
     bridge: CodexBridge | None = None
     if not args.no_codex:
         bridge = CodexBridge(
