@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+appdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+python_version="$("$appdir/usr/bin/python3" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+
+export PYTHONHOME="$appdir/usr"
+export PYTHONPATH="$appdir/usr/lib/python3/dist-packages"
+export XDG_DATA_DIRS="$appdir/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+export PATH="$appdir/usr/bin:${PATH:-/usr/local/bin:/usr/bin:/bin}"
+
+# Python discovers its bundled stdlib through PYTHONHOME. Keeping the explicit
+# version check here gives useful diagnostics if someone manually alters AppDir.
+test -d "$appdir/usr/lib/python$python_version" || {
+  echo "PetCat AppImage Python library is incomplete" >&2
+  exit 1
+}
+
+if test "${1:-}" = "--check-cairo"; then
+  exec "$appdir/usr/bin/python3" -c \
+    "import cairo, gi; gi.require_version('Gdk', '3.0'); from gi.repository import Gdk; assert cairo.Context; assert Gdk"
+fi
+
+exec -a PetCat "$appdir/usr/bin/python3" \
+  "$appdir/usr/share/petcat/src/standalone_pet.py" "$@"

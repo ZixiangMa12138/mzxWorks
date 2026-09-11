@@ -79,6 +79,31 @@ The PID, lock, log, and manual state are local, disposable files in `runtime/`; 
 
 The installer uses `xdg-user-dir DESKTOP` for the desktop entry and installs an application-menu entry under `$XDG_DATA_HOME/applications` (default: `~/.local/share/applications`). A Desktop Entry must contain an absolute executable path, so the generated local file contains your clone location. Re-run the installer after moving or recloning the project. The tracked template `desktop/swing-pet.desktop.in` contains no personal path.
 
+### One-command AppImage build
+
+```bash
+./build-appimage.sh
+```
+
+The default output is `dist/appimage/PetCat-1.0.0-x86_64.AppImage` (`aarch64` on an ARM64 host). Set a release version with:
+
+```bash
+VERSION=1.1.0 ./build-appimage.sh
+```
+
+The first build downloads the architecture-matched `appimagetool` from the official AppImage GitHub Releases and caches it under `build/appimage/tools/`. It also accepts linuxdeploy's extracted layout: copy `appimagetool-root/` and `runtime-x86_64` (or `runtime-aarch64`) into `build/appimage/tools/` for a fully offline build. Alternatively, set `APPIMAGETOOL=/absolute/path/to/appimagetool` and `APPIMAGE_RUNTIME_FILE=/absolute/path/to/runtime-x86_64`. The script runs `--diagnose` inside the completed AppDir before producing the single-file image and writes `SHA256SUMS` beside it.
+
+The AppImage embeds a matching Python interpreter and standard library, PyGObject, Pillow, runtime code under `src/`, all four animations, the icon, and the six release audio files. It excludes `assets/audio/previews/`, QA output, PIDs, and logs. Run it with:
+
+```bash
+chmod +x dist/appimage/PetCat-1.0.0-x86_64.AppImage
+./dist/appimage/PetCat-1.0.0-x86_64.AppImage
+./dist/appimage/PetCat-1.0.0-x86_64.AppImage --no-codex
+./dist/appimage/PetCat-1.0.0-x86_64.AppImage --diagnose
+```
+
+GTK 3, GStreamer, glibc, the graphical session, and the audio service remain base components of the target Linux system. This is more reliable than copying a host glibc and an entire desktop stack into the image. Build and test on the oldest distribution you plan to support. The build host also needs `curl`; the script runs appimagetool in extract-and-run mode when FUSE is unavailable.
+
 ## Codex integration
 
 The standalone edition enables `CodexBridge` by default. It reads only local Codex App Server/session information, never makes network requests, and maps activity to the bubble text and swing speed. Its priority is:
@@ -132,6 +157,7 @@ The installer copies `pet.json` and `spritesheet.webp` to `${CODEX_HOME:-$HOME/.
 - Linux, Python 3.10+, GTK 3, and a graphical session (X11 or a Wayland compositor with transparent-window support);
 - PyGObject/GTK system packages; for Ubuntu/Debian: `sudo apt install python3-gi gir1.2-gtk-3.0`;
 - GStreamer 1.0 and common audio plugins; for Ubuntu/Debian: `sudo apt install gir1.2-gstreamer-1.0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good`;
+- `curl` to build the AppImage; the script downloads official `appimagetool`, or accepts a local copy through `APPIMAGETOOL`;
 - Pillow, NumPy, and SciPy from `requirements.txt` for building/image processing;
 - `swing-interactive.png`, `standing-transparent.png`, `jump-down.png`, and `jump-up.png` in `assets/runtime/` to run the standalone edition;
 - the six release audio files listed above in `assets/audio/` when sound is enabled (`previews/` is not used at runtime);
@@ -148,12 +174,15 @@ myPet/
 ├── assets/audio/        # Interaction voices, rotor, explosion, chains, and unlock sounds
 ├── assets/icons/        # Launcher icon built from the lowest swing frame
 ├── desktop/             # Desktop Entry template with a path placeholder
+├── packaging/appimage/  # AppRun, Desktop Entry, and AppStream templates
 ├── dist/swing-pet/      # Installable local Codex v2 package
+├── dist/appimage/       # Generated standalone AppImage (Git-ignored)
 ├── runtime/             # Local PID, lock, log, manual state (Git-ignored)
 ├── src/                 # Runtime, bridge, and asset builders
 ├── tests/               # State, drag, affection, and unlock tests
 ├── pet.config.json      # Atlas id, geometry, and source-cycle configuration
 ├── start-standalone.sh  # Foreground standalone launcher
+├── build-appimage.sh    # Build the single-file AppImage
 ├── install-desktop.sh   # Desktop/menu installer
 └── install-local.sh     # Local Codex package installer
 ```

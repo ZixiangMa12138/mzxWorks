@@ -79,6 +79,31 @@ python3 src/autostart_pet.py
 
 安装器会根据 `xdg-user-dir DESKTOP` 创建桌面入口，并在 `$XDG_DATA_HOME/applications`（默认 `~/.local/share/applications`）创建应用菜单入口。Desktop Entry 规范要求可执行文件路径为绝对路径，因此安装后的 `.desktop` 文件会包含当前克隆位置；项目移动或重新克隆后，重新运行此安装器即可更新它。模板 `desktop/swing-pet.desktop.in` 本身不含个人路径。
 
+### 一键构建 AppImage
+
+```bash
+./build-appimage.sh
+```
+
+默认生成 `dist/appimage/PetCat-1.0.0-x86_64.AppImage`（ARM64 主机生成 `aarch64`）。指定版本：
+
+```bash
+VERSION=1.1.0 ./build-appimage.sh
+```
+
+首次构建会从 AppImage 官方 GitHub Releases 下载对应架构的 `appimagetool`，以后复用 `build/appimage/tools/` 中的缓存。构建脚本也兼容 linuxdeploy 提取出的工具目录及独立 runtime：将 `appimagetool-root/` 和 `runtime-x86_64`（或 `runtime-aarch64`）放入 `build/appimage/tools/` 即可完全离线构建。也可通过 `APPIMAGETOOL=/absolute/path/to/appimagetool` 与 `APPIMAGE_RUNTIME_FILE=/absolute/path/to/runtime-x86_64` 显式指定。脚本会先运行 AppDir 内的 `--diagnose`，成功后才压缩单文件，并在同一目录生成 `SHA256SUMS`。
+
+AppImage 包含匹配的 Python 解释器与标准库、PyGObject、Pillow、`src/` 运行代码、四套动画、图标和六个正式音频，不包含 `assets/audio/previews/`、QA 文件或本机 PID/日志。运行方式：
+
+```bash
+chmod +x dist/appimage/PetCat-1.0.0-x86_64.AppImage
+./dist/appimage/PetCat-1.0.0-x86_64.AppImage
+./dist/appimage/PetCat-1.0.0-x86_64.AppImage --no-codex
+./dist/appimage/PetCat-1.0.0-x86_64.AppImage --diagnose
+```
+
+GTK 3、GStreamer、glibc、图形会话及音频服务仍使用目标 Linux 系统的基础组件；这样比把宿主机 glibc 和整套桌面栈强行复制进包内更稳定。建议在计划支持的最旧 Linux 发行版上构建并测试。构建端还需要 `curl`；`appimagetool` 在无 FUSE 的环境中会通过 extract-and-run 模式执行。
+
 ## 与 Codex 绑定联动
 
 独立桌面版默认启用 `CodexBridge`。它只读取本机 Codex App Server/会话数据，不请求网络，并把状态显示为“工作中”“思考中”或“空闲中”。优先级如下：
@@ -134,6 +159,7 @@ python3 src/build_pet.py
 - Linux、Python 3.10+、GTK 3 与可用的图形会话（X11 或支持透明窗口的 Wayland 合成器）；
 - PyGObject/GTK 的系统包；Ubuntu/Debian 示例：`sudo apt install python3-gi gir1.2-gtk-3.0`；
 - GStreamer 1.0 及常用音频解码插件；Ubuntu/Debian 示例：`sudo apt install gir1.2-gstreamer-1.0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good`；
+- 构建 AppImage 额外需要 `curl`；脚本会下载官方 `appimagetool`，也可通过 `APPIMAGETOOL` 指定本地副本；
 - `requirements.txt` 中的 Pillow、NumPy、SciPy（构建和图像处理需要）；
 - `assets/runtime/` 内的 `swing-interactive.png`、`standing-transparent.png`、`jump-down.png`、`jump-up.png`（运行独立版需要）；
 - `assets/audio/` 内表格列出的 6 个正式音频文件（开启声音时需要；`previews/` 不参与运行）；
@@ -151,13 +177,16 @@ myPet/
 │   ├── audio/                  # 交互语音、螺旋桨、爆炸、铁链与开锁音效
 │   └── icons/                  # 从最低点摆动帧生成的应用图标
 ├── desktop/                    # 路径占位符形式的 Desktop Entry 模板
+├── packaging/appimage/         # AppRun、Desktop Entry 与 AppStream 模板
 ├── dist/swing-pet/             # 可安装的 Codex v2 本地宠物包
+├── dist/appimage/              # 一键构建出的独立 AppImage（Git 忽略）
 ├── runtime/                    # 本机 PID、锁、日志、人工状态（Git 忽略）
 ├── src/                        # 运行时、桥接器和构建工具
 ├── tests/                      # 状态、拖拽、亲密度与解锁的单元测试
 ├── pet.config.json             # 图集 id、尺寸和源周期配置
 ├── requirements.txt            # Python 构建依赖
 ├── start-standalone.sh         # 前台独立启动
+├── build-appimage.sh           # 构建单文件 AppImage
 ├── install-desktop.sh          # 安装快捷方式
 └── install-local.sh            # 安装 Codex 本地包
 ```

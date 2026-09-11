@@ -695,11 +695,17 @@ class LockdownOverlay(Gtk.Window):
         pet_x, pet_y = owner.get_position()
         pet_width = owner.get_allocated_width() or owner.frames[0].width
         pet_height = owner.get_allocated_height() or owner.frames[0].height
-        screen = owner.get_screen()
-        monitor = screen.get_monitor_at_point(
+        display = owner.get_display()
+        monitor = display.get_monitor_at_point(
             pet_x + pet_width // 2, pet_y + pet_height // 2
         )
-        self.workarea = screen.get_monitor_workarea(monitor)
+        self.workarea = monitor.get_workarea()
+
+        # Gdk.Monitor owns the selected display's geometry, while GTK 3 still
+        # exposes RGBA visual/compositor capabilities through Gdk.Screen. Keep
+        # both objects: using the monitor places the overlay on the pet's
+        # current screen, and using the screen makes its background transparent.
+        screen = owner.get_screen()
 
         self.set_decorated(False)
         self.set_resizable(False)
@@ -1227,11 +1233,11 @@ class PetWindow(Gtk.Window):
 
         # Clamp against the monitor currently containing the pet, not the primary
         # monitor. This keeps the bubble attached when crossing screen boundaries.
-        screen = self.get_screen()
-        monitor = screen.get_monitor_at_point(
+        display = self.get_display()
+        monitor = display.get_monitor_at_point(
             root_x + pet_width // 2, root_y + pet_height // 2
         )
-        workarea = screen.get_monitor_workarea(monitor)
+        workarea = monitor.get_workarea()
         x = max(workarea.x + 4, min(x, workarea.x + workarea.width - popup_width - 4))
         y = max(workarea.y + 4, min(y, workarea.y + workarea.height - popup_height - 4))
         self.info_popup.move(x, y)
@@ -1527,9 +1533,9 @@ class PetWindow(Gtk.Window):
 
     def _place_bottom_right(self, *_args) -> None:
         """Choose a deterministic initial position inside the primary work area."""
-        screen = self.get_screen()
-        monitor = screen.get_primary_monitor()
-        geometry = screen.get_monitor_workarea(monitor)
+        display = self.get_display()
+        monitor = display.get_primary_monitor()
+        geometry = monitor.get_workarea()
         margin = round(24 * self.scale)
         self.move(
             geometry.x + geometry.width - self.frames[0].width - margin,

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.petcat</id>
+  <name>PetCat</name>
+  <summary>Interactive swinging desktop pet</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LicenseRef-Proprietary</project_license>
+  <description>
+    <p>PetCat is a transparent animated desktop companion with pointer interaction, affection, sound effects, and optional local Codex status integration.</p>
+  </description>
+  <launchable type="desktop-id">petcat.desktop</launchable>
+  <provides><binary>petcat</binary></provides>
+  <releases><release version="@VERSION@" date="2026-09-11"/></releases>
+</component>
+

@@ -6,6 +6,9 @@ __pycache__/
 # Per-machine runtime state created by the background launcher
 runtime/*
 !runtime/.gitkeep
+build/appimage/
+dist/appimage/*.AppImage
+dist/appimage/SHA256SUMS
 
 # Reproducible QA output can embed local paths and includes large previews
 qa/*.json
