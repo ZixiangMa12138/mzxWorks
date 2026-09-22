@@ -1,0 +1,2 @@
+dingtalk-stream==0.24.3
+openai-codex==0.154.0
