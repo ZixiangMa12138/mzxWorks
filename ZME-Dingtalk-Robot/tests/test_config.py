@@ -26,6 +26,8 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(2, settings.codex_max_concurrency)
         self.assertEqual(10, settings.max_active_threads)
         self.assertEqual(300.0, settings.conversation_idle_timeout_seconds)
+        self.assertEqual(7.0, settings.message_dedup_retention_days)
+        self.assertEqual(3_600.0, settings.sqlite_cleanup_interval_seconds)
         self.assertEqual(4_000, settings.max_reply_characters)
 
     def test_requires_only_dingtalk_credentials(self) -> None:

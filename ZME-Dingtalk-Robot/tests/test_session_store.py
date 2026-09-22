@@ -45,6 +45,24 @@ class SessionStoreTest(unittest.TestCase):
         self.assertTrue(first)
         self.assertFalse(duplicate)
 
+    def test_deletes_only_processed_messages_older_than_cutoff(self) -> None:
+        self.store.claim_message("old-message", "conversation-1", 99.0)
+        self.store.claim_message("at-cutoff", "conversation-1", 100.0)
+        self.store.claim_message("new-message", "conversation-1", 101.0)
+
+        deleted = self.store.delete_processed_messages_before(100.0)
+
+        self.assertEqual(1, deleted)
+        self.assertTrue(
+            self.store.claim_message("old-message", "conversation-1", 102.0)
+        )
+        self.assertFalse(
+            self.store.claim_message("at-cutoff", "conversation-1", 102.0)
+        )
+        self.assertFalse(
+            self.store.claim_message("new-message", "conversation-1", 102.0)
+        )
+
     def test_clear_returns_previous_thread(self) -> None:
         self.store.save_session("conversation-1", "thread-1", 100.0)
 

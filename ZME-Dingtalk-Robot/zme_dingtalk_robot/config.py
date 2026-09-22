@@ -46,6 +46,8 @@ class Settings:
     codex_max_concurrency: int = 2
     max_active_threads: int = 10
     conversation_idle_timeout_seconds: float = 300.0
+    message_dedup_retention_days: float = 7.0
+    sqlite_cleanup_interval_seconds: float = 3_600.0
     max_reply_characters: int = 4_000
     dingtalk_reply_timeout_seconds: float = 20.0
     log_level: str = "INFO"
@@ -70,6 +72,14 @@ class Settings:
             conversation_idle_timeout_seconds=_positive_float(
                 "CONVERSATION_IDLE_TIMEOUT_SECONDS",
                 300.0,
+            ),
+            message_dedup_retention_days=_positive_float(
+                "MESSAGE_DEDUP_RETENTION_DAYS",
+                7.0,
+            ),
+            sqlite_cleanup_interval_seconds=_positive_float(
+                "SQLITE_CLEANUP_INTERVAL_SECONDS",
+                3_600.0,
             ),
             max_reply_characters=_positive_int("MAX_REPLY_CHARACTERS", 4_000),
             dingtalk_reply_timeout_seconds=_positive_float(

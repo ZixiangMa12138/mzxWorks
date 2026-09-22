@@ -80,6 +80,25 @@ class SessionStore:
             # including duplicate deliveries racing in separate tasks.
             return cursor.rowcount == 1
 
+    def delete_processed_messages_before(self, cutoff: float) -> int:
+        """Delete deduplication keys older than ``cutoff`` and return the count.
+
+        This intentionally does not run ``VACUUM``.  SQLite can reuse freed
+        pages, while rebuilding the database file during normal bot traffic
+        would take a stronger lock and add avoidable latency.
+        """
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM processed_messages WHERE processed_at < ?",
+                (cutoff,),
+            )
+            deleted = cursor.rowcount
+            # Refresh planner statistics opportunistically after the bounded
+            # retention cleanup.  PRAGMA optimize is lightweight and lets
+            # SQLite decide whether any analysis work is actually necessary.
+            connection.execute("PRAGMA optimize")
+        return deleted
+
     def get_session(self, session_key: str) -> ConversationSession | None:
         with self._connect() as connection:
             row = connection.execute(

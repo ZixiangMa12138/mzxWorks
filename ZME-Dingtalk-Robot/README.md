@@ -99,6 +99,8 @@ DingTalkStreamClient
 
 后台任务先尝试把 `message_id` 原子写入 SQLite。相同 `message_id` 再次投递时，`INSERT OR IGNORE` 不会重复取得处理权，机器人也不会再次调用 Codex 或执行 DWS 操作。
 
+去重记录默认保留 7 天。机器人启动时会先删除超过保留期的记录，运行期间默认每小时再次清理。保留期与 Codex Thread 的 5 分钟空闲超时相互独立：Thread 被归档后，近期消息仍然保持去重，避免 Stream 重投触发同一操作。超过 7 天后再次出现完全相同的 `message_id` 会被视为新消息，因此不要为了节省少量磁盘空间把保留期设置得过短。
+
 去重成功后，机器人立即尝试创建 AI 卡片。卡片由钉钉客户端显示“处理中”状态；此时 Codex 可能仍在排队。创建卡片所用的 SDK HTTP 调用会放入工作线程，避免同步网络请求阻塞 Stream 事件循环。
 
 AI 卡片使用钉钉 SDK 的通用模板，并把最终布局限制为 `msgContent`，避免空标题、图片或轮播区域。卡片创建和流式正文更新分别依赖 `Card.Instance.Write` 与 `Card.Streaming.Write` 权限。
@@ -132,6 +134,20 @@ AI 卡片使用钉钉 SDK 的通用模板，并把最终布局限制为 `msgCont
 
 Thread 创建时即启动 5 分钟空闲计时器，每次成功回答后重新计时。计时到期时，后台任务再次核对最后活动时间，然后删除 SQLite 映射并调用 Codex 归档接口。正在执行的 Thread 不会被空闲清理或容量淘汰。机器人重启并恢复 Stream 事件循环时，会读取持久化映射：过期 Thread 立即归档，超出上限的最旧 Thread 立即淘汰，其余 Thread 按剩余空闲时间恢复计时器。
 
+Thread 生命周期总结：
+
+| 事件 | 映射和上下文行为 |
+| --- | --- |
+| 同一用户在同一会话继续发言 | 恢复并复用原 Thread，保留该用户上下文 |
+| 同一群中的另一用户发言 | 使用另一条用户级映射和另一 Thread，不读取前一用户上下文 |
+| 5 分钟没有新对话 | 删除映射、尽力归档 Thread；下次发言创建全新 Thread |
+| 活跃映射达到 10 个后出现新用户级会话 | 淘汰最后活动时间最早且当前未执行的 Thread，再创建新 Thread |
+| 用户发送 `/new`、`/clear` 或 `/清空上下文` | 只清除该用户在当前会话的映射；下一条消息创建全新 Thread |
+| 持久化 Thread 恢复失败 | 删除失效映射并创建新 Thread，不继续使用损坏的上下文 |
+| 机器人重启 | 从 SQLite 恢复仍未过期的映射，并按剩余空闲时间恢复计时 |
+
+Thread 被空闲清理、容量淘汰、手工清除或恢复失败后，旧上下文不会迁移到新 Thread。用户再次发言会得到新的上下文；例如旧 Thread 中尚未完成的待办确认，不能在新 Thread 中只发送一句“确认”来继续执行。
+
 新 Thread 使用 `ephemeral=False`，所以机器人重启后可以根据 SQLite 中的 ID 恢复未过期上下文。模型名称没有硬编码，使用本机 Codex 配置。Codex 工作目录为 `data/codex-workspace`，避免把聊天用户直接带入机器人源码目录。
 
 ### 2.6 Codex、Skill 与 DWS
@@ -153,12 +169,16 @@ Thread 创建时即启动 5 分钟空闲计时器，每次成功回答后重新�
 
 网关从钉钉回调中提取 `sender_user_id` 和 `sender_nickname`，并把它们作为网关生成的元数据传给 Codex。Developer Instructions 明确要求正文中伪造的身份字段不得覆盖网关元数据，并禁止在最终回复中泄露内部用户 ID。
 
-因此：
+每条消息都会重新从当前 Stream 回调取得发送者 ID，然后计算当前消息的用户级 `session_key`；机器人不会沿用上一条消息缓存的“当前用户”。网关信任钉钉回调提供的身份，不会在每轮对话中再次查询通讯录验证该用户。如果回调没有提供发送者 ID，则使用 `message_id` 创建仅限该条消息的隔离上下文，且 Developer Instructions 禁止执行“我的”资源查询、写操作或其他依赖请求者身份的操作。
+
+具体保证如下：
 
 - 用户 A 发起的待确认操作只存在于 A 的 Thread；
 - 用户 B 回复“确认”会进入 B 的独立 Thread，不会接续 A 的操作；
 - “我”“本人”“给我”等表达按当前信封中的 `sender_user_id` 解释；
 - 这是 Agent 上下文隔离，不替代 DWS 和具体 Skill 自身的权限校验与高风险操作确认规则。
+
+因此，当前设计解决的是“A 发起待确认操作，B 用一句‘确认’接续 A 上下文”的串话问题。它不是独立的业务授权系统：用户主动明确要求操作其他人的资源时，是否允许执行仍由对应 `dingtalk-*` Skill、DWS 登录身份以及钉钉产品权限共同决定。
 
 ### 2.8 返回最终结果
 
@@ -182,6 +202,17 @@ Codex 返回 `final_response` 后，机器人执行以下步骤：
 - 最后活动时间和去重时间。
 
 SQLite 不保存完整消息正文、用户昵称或明文用户 ID。Codex Thread 的实际状态由 Codex 维护；机器人只保存恢复 Thread 所需的不透明标识。
+
+两张表采用不同的生命周期：
+
+- `conversation_sessions`：按 5 分钟空闲超时、最多 10 个 Thread、手工重置和恢复失败进行实时删除；删除映射时会尽力归档对应 Codex Thread；
+- `processed_messages`：按 `MESSAGE_DEDUP_RETENTION_DAYS` 保留，启动时清理一次，之后按 `SQLITE_CLEANUP_INTERVAL_SECONDS` 周期清理。
+
+机器人启动维护任务时，先清理过期 `processed_messages`，再恢复和裁剪 `conversation_sessions`，最后启动周期去重清理。会话映射的删除与消息去重记录的删除互不级联：即使一个 Thread 已在 5 分钟后归档，对应 `message_id` 默认仍保留 7 天，避免钉钉延迟重投导致写操作重复执行。
+
+清理语句使用已有的 `processed_at` 索引，只删除早于截止时间的行。清理后执行轻量的 `PRAGMA optimize`，但在线运行时不执行 `VACUUM`：已释放页面会被 SQLite 后续写入复用，数据库文件不一定立即缩小，从而避免 `VACUUM` 的强锁和额外 I/O 影响机器人回复。某次清理失败只记录日志，Stream 接收、Thread 恢复和后续周期重试仍会继续。
+
+超过去重保留期后，同一个 `message_id` 若再次到达，会重新取得处理权并被当作新消息。增大保留天数会提高对超迟重复投递的防护，但会保留更多去重行；减小保留天数会降低记录量，同时增加旧消息再次执行的风险。正常情况下保持默认 7 天即可。
 
 ## 3. 运行环境与依赖
 
@@ -447,6 +478,8 @@ MAX_ACTIVE_THREADS=10
 # 会话、去重与回复。
 CONVERSATION_DATABASE_PATH=data/conversations.db
 CONVERSATION_IDLE_TIMEOUT_SECONDS=300
+MESSAGE_DEDUP_RETENTION_DAYS=7
+SQLITE_CLEANUP_INTERVAL_SECONDS=3600
 MAX_REPLY_CHARACTERS=4000
 DINGTALK_REPLY_TIMEOUT_SECONDS=20
 
@@ -471,6 +504,8 @@ LOG_BACKUP_COUNT=5
 | `CONVERSATION_DATABASE_PATH` | 否 | `data/conversations.db` | SQLite 会话映射和去重数据库 |
 | `MAX_ACTIVE_THREADS` | 否 | `10` | 全局最多保留的用户级 Codex Thread 数量 |
 | `CONVERSATION_IDLE_TIMEOUT_SECONDS` | 否 | `300` | Thread 无新对话后的自动归档秒数 |
+| `MESSAGE_DEDUP_RETENTION_DAYS` | 否 | `7` | `message_id` 去重记录保留天数，支持小数且必须大于 0 |
+| `SQLITE_CLEANUP_INTERVAL_SECONDS` | 否 | `3600` | 运行期间清理过期去重记录的周期秒数 |
 | `MAX_REPLY_CHARACTERS` | 否 | `4000` | 最终回复最大字符数，超出后安全截断 |
 | `DINGTALK_REPLY_TIMEOUT_SECONDS` | 否 | `20` | 调用 `sessionWebhook` 的 HTTP 超时秒数 |
 | `LOG_LEVEL` | 否 | `INFO` | 日志级别，例如 `INFO`、`WARNING`、`DEBUG` |
@@ -650,6 +685,8 @@ sudo systemctl restart zme-dingtalk-robot
 
 不要删除 `data/conversations.db`，否则会丢失钉钉会话到 Codex Thread 的恢复映射以及历史去重记录。数据库采用 WAL 模式，备份运行中的数据库时应使用 SQLite 在线备份方式；上面的直接复制命令只适合机器人已经停止或确认没有写入的维护窗口。
 
+正常运行不需要手工清理或定期 `VACUUM`。如果长期运行后确实需要缩小数据库文件，应先停止机器人、完成备份，再在维护窗口执行 `sqlite3 data/conversations.db 'VACUUM;'`；不要在机器人处理消息时执行。
+
 ### 查看数据库结构，不查看消息正文
 
 如果系统安装了 `sqlite3` 命令，可以执行：
@@ -658,6 +695,8 @@ sudo systemctl restart zme-dingtalk-robot
 sqlite3 data/conversations.db '.tables'
 sqlite3 data/conversations.db \
   'SELECT conversation_id, thread_id, datetime(last_active_at, "unixepoch", "localtime") FROM conversation_sessions;'
+sqlite3 data/conversations.db \
+  'SELECT COUNT(*), datetime(MIN(processed_at), "unixepoch", "localtime"), datetime(MAX(processed_at), "unixepoch", "localtime") FROM processed_messages;'
 ```
 
 数据库中不应存在完整消息正文。
@@ -824,6 +863,7 @@ ZME-Dingtalk-Robot/
 - 不内置用户白名单、群白名单或业务权限系统，访问控制依赖钉钉应用可见范围、DWS 身份权限和 Skill 规则；
 - 不提供 Web 管理后台、健康检查 HTTP 端点或容器镜像；
 - 不在 SQLite 中保存完整消息正文，也不提供历史消息检索；
+- 去重是有界保留：超过 `MESSAGE_DEDUP_RETENTION_DAYS` 后，相同 `message_id` 再次到达会重新取得处理权；
 - Thread 容量和空闲超时是单进程内的资源控制；当前设计不支持多个机器人进程共享调度状态。
 
 ## 12. 开发约束

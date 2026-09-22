@@ -280,6 +280,43 @@ class AgentServiceTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(10, len(self.store.list_sessions_oldest_first()))
 
+    async def test_startup_removes_expired_deduplication_records(self) -> None:
+        self.store.claim_message("expired-message", "conversation-1", 899.0)
+        self.store.claim_message("retained-message", "conversation-1", 901.0)
+        service = AgentService(
+            self.backend,
+            self.store,
+            message_dedup_retention_seconds=100.0,
+            clock=lambda: self.now,
+        )
+
+        await service.start_maintenance()
+
+        self.assertTrue(
+            self.store.claim_message("expired-message", "conversation-1", self.now)
+        )
+        self.assertFalse(
+            self.store.claim_message("retained-message", "conversation-1", self.now)
+        )
+
+    async def test_periodically_removes_expired_deduplication_records(self) -> None:
+        self.store.claim_message("message-1", "conversation-1", self.now)
+        service = AgentService(
+            self.backend,
+            self.store,
+            message_dedup_retention_seconds=5.0,
+            sqlite_cleanup_interval_seconds=0.01,
+            clock=lambda: self.now,
+        )
+        await service.start_maintenance()
+        self.now += 6.0
+
+        await asyncio.sleep(0.03)
+
+        self.assertTrue(
+            self.store.claim_message("message-1", "conversation-1", self.now)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

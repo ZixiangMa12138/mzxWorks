@@ -50,6 +50,8 @@ class AgentService:
         max_concurrency: int = 2,
         max_active_threads: int = 10,
         session_ttl_seconds: float = 300.0,
+        message_dedup_retention_seconds: float = 7 * 24 * 60 * 60,
+        sqlite_cleanup_interval_seconds: float = 60 * 60,
         max_reply_characters: int = 4_000,
         clock: Callable[[], float] = time.time,
         logger: logging.Logger | None = None,
@@ -60,6 +62,10 @@ class AgentService:
             raise ValueError("session_ttl_seconds 必须大于 0")
         if max_active_threads <= 0:
             raise ValueError("max_active_threads 必须大于 0")
+        if message_dedup_retention_seconds <= 0:
+            raise ValueError("message_dedup_retention_seconds 必须大于 0")
+        if sqlite_cleanup_interval_seconds <= 0:
+            raise ValueError("sqlite_cleanup_interval_seconds 必须大于 0")
         if max_reply_characters <= 0:
             raise ValueError("max_reply_characters 必须大于 0")
 
@@ -68,6 +74,8 @@ class AgentService:
         self._semaphore = asyncio.Semaphore(max_concurrency)
         self._max_active_threads = max_active_threads
         self._session_ttl_seconds = session_ttl_seconds
+        self._message_dedup_retention_seconds = message_dedup_retention_seconds
+        self._sqlite_cleanup_interval_seconds = sqlite_cleanup_interval_seconds
         self._max_reply_characters = max_reply_characters
         self._clock = clock
         self._logger = logger or logging.getLogger(__name__)
@@ -82,6 +90,7 @@ class AgentService:
         self._expiry_tasks: dict[str, asyncio.Task[None]] = {}
         self._maintenance_started = False
         self._startup_maintenance_task: asyncio.Task[None] | None = None
+        self._dedup_cleanup_task: asyncio.Task[None] | None = None
 
     def start_maintenance(self) -> asyncio.Task[None]:
         """Restore idle timers once the DingTalk event loop is running."""
@@ -90,9 +99,54 @@ class AgentService:
             return self._startup_maintenance_task
         self._maintenance_started = True
         self._startup_maintenance_task = asyncio.create_task(
-            self._restore_expiry_tasks()
+            self._start_maintenance()
         )
         return self._startup_maintenance_task
+
+    async def _start_maintenance(self) -> None:
+        """Clean persisted state, restore timers, then start periodic cleanup."""
+        await self._cleanup_processed_messages()
+        await self._restore_expiry_tasks()
+        self._dedup_cleanup_task = asyncio.create_task(
+            self._run_periodic_dedup_cleanup()
+        )
+        self._dedup_cleanup_task.add_done_callback(self._dedup_cleanup_done)
+
+    async def _run_periodic_dedup_cleanup(self) -> None:
+        """Bound deduplication storage without coupling it to Thread expiry."""
+        while True:
+            await asyncio.sleep(self._sqlite_cleanup_interval_seconds)
+            await self._cleanup_processed_messages()
+
+    async def _cleanup_processed_messages(self) -> None:
+        cutoff = self._clock() - self._message_dedup_retention_seconds
+        try:
+            deleted = await asyncio.to_thread(
+                self._store.delete_processed_messages_before,
+                cutoff,
+            )
+        except Exception:
+            # Database housekeeping must never prevent Stream startup or stop
+            # later cleanup attempts.  The next interval retries naturally.
+            self._logger.exception("SQLite 消息去重记录清理失败 cutoff=%s", cutoff)
+            return
+        if deleted:
+            self._logger.info(
+                "SQLite 消息去重记录清理完成 deleted=%d cutoff=%s",
+                deleted,
+                cutoff,
+            )
+
+    def _dedup_cleanup_done(self, completed: asyncio.Task[None]) -> None:
+        if completed.cancelled():
+            return
+        error = completed.exception()
+        if error is not None:
+            self._logger.error(
+                "SQLite 周期清理任务异常 error=%s",
+                error,
+                exc_info=(type(error), error, error.__traceback__),
+            )
 
     async def claim_message(self, context: MessageContext) -> bool:
         """Atomically reserve a DingTalk message before starting any work."""
@@ -426,7 +480,11 @@ def _is_reset_command(text: str) -> bool:
 
 def _session_key(context: MessageContext) -> str:
     """Build an opaque key scoped to one user inside one DingTalk chat."""
-    identity = f"{context.conversation_id}\0{context.sender_user_id}"
+    # Never merge unidentified group members into one context.  A missing
+    # sender ID gets a one-message scope and therefore cannot confirm another
+    # person's pending operation.
+    actor_key = context.sender_user_id or f"unknown:{context.message_id}"
+    identity = f"{context.conversation_id}\0{actor_key}"
     return "v2:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 

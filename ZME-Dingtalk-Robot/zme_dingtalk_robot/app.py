@@ -47,6 +47,10 @@ def run(settings: Settings) -> None:
         max_concurrency=settings.codex_max_concurrency,
         max_active_threads=settings.max_active_threads,
         session_ttl_seconds=settings.conversation_idle_timeout_seconds,
+        message_dedup_retention_seconds=(
+            settings.message_dedup_retention_days * 24 * 60 * 60
+        ),
+        sqlite_cleanup_interval_seconds=settings.sqlite_cleanup_interval_seconds,
         max_reply_characters=settings.max_reply_characters,
         logger=logging.getLogger("zme_dingtalk_robot.agent"),
     )
